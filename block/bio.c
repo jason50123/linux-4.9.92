@@ -592,6 +592,11 @@ void __bio_clone_fast(struct bio *bio, struct bio *bio_src)
 	bio->bi_iter = bio_src->bi_iter;
 	bio->bi_io_vec = bio_src->bi_io_vec;
 
+	/* Clone UID tracking information */
+	bio->bi_uid = bio_src->bi_uid;
+	bio->bi_pid = bio_src->bi_pid;
+	bio->bi_prio = bio_src->bi_prio;
+
 	bio_clone_blkcg_association(bio, bio_src);
 }
 EXPORT_SYMBOL(__bio_clone_fast);
@@ -674,6 +679,11 @@ struct bio *bio_clone_bioset(struct bio *bio_src, gfp_t gfp_mask,
 	bio->bi_opf		= bio_src->bi_opf;
 	bio->bi_iter.bi_sector	= bio_src->bi_iter.bi_sector;
 	bio->bi_iter.bi_size	= bio_src->bi_iter.bi_size;
+
+	/* Clone UID tracking information */
+	bio->bi_uid		= bio_src->bi_uid;
+	bio->bi_pid		= bio_src->bi_pid;
+	bio->bi_prio		= bio_src->bi_prio;
 
 	switch (bio_op(bio)) {
 	case REQ_OP_DISCARD:
