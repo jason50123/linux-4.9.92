@@ -33,6 +33,7 @@
 #include <linux/ratelimit.h>
 #include <linux/pm_runtime.h>
 #include <linux/blk-cgroup.h>
+#include <linux/uidgid.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/block.h>
@@ -127,6 +128,7 @@ void blk_rq_init(struct request_queue *q, struct request *rq)
 	INIT_LIST_HEAD(&rq->timeout_list);
 	rq->cpu = -1;
 	rq->q = q;
+	rq->rq_uid = INVALID_UID;
 	rq->__sector = (sector_t) -1;
 	INIT_HLIST_NODE(&rq->hash);
 	RB_CLEAR_NODE(&rq->rb_node);
@@ -1606,7 +1608,11 @@ bool blk_attempt_plug_merge(struct request_queue *q, struct bio *bio,
 				*same_queue_rq = rq;
 		}
 
-		if (rq->q != q || !blk_rq_merge_ok(rq, bio))
+		if (rq->q != q)
+			continue;
+		if (!uid_eq(rq->rq_uid, bio->bi_uid))
+			continue;
+		if (!blk_rq_merge_ok(rq, bio))
 			continue;
 
 		el_ret = blk_try_merge(rq, bio);
@@ -1651,6 +1657,7 @@ out:
 void init_request_from_bio(struct request *req, struct bio *bio)
 {
 	req->cmd_type = REQ_TYPE_FS;
+	req->rq_uid = bio->bi_uid;
 
 	req->cmd_flags |= bio->bi_opf & REQ_COMMON_MASK;
 	if (bio->bi_opf & REQ_RAHEAD)

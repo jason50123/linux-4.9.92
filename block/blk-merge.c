@@ -5,6 +5,7 @@
 #include <linux/module.h>
 #include <linux/bio.h>
 #include <linux/blkdev.h>
+#include <linux/uidgid.h>
 #include <linux/scatterlist.h>
 
 #include <trace/events/block.h>
@@ -673,6 +674,9 @@ static void blk_account_io_merge(struct request *req)
 static int attempt_merge(struct request_queue *q, struct request *req,
 			  struct request *next)
 {
+	if (!uid_eq(req->rq_uid, next->rq_uid))
+		return 0;
+
 	if (!rq_mergeable(req) || !rq_mergeable(next))
 		return 0;
 
@@ -776,12 +780,18 @@ int blk_attempt_req_merge(struct request_queue *q, struct request *rq,
 		if (!e->type->ops.elevator_allow_rq_merge_fn(q, rq, next))
 			return 0;
 
+	if (!uid_eq(rq->rq_uid, next->rq_uid))
+		return 0;
+
 	return attempt_merge(q, rq, next);
 }
 
 bool blk_rq_merge_ok(struct request *rq, struct bio *bio)
 {
 	if (!rq_mergeable(rq) || !bio_mergeable(bio))
+		return false;
+
+	if (!uid_eq(rq->rq_uid, bio->bi_uid))
 		return false;
 
 	if (req_op(rq) != bio_op(bio))

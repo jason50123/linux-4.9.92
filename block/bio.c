@@ -275,6 +275,7 @@ void bio_init(struct bio *bio)
 	memset(bio, 0, sizeof(*bio));
 	atomic_set(&bio->__bi_remaining, 1);
 	atomic_set(&bio->__bi_cnt, 1);
+	bio_mark_owner(bio);
 }
 EXPORT_SYMBOL(bio_init);
 
@@ -297,6 +298,7 @@ void bio_reset(struct bio *bio)
 	memset(bio, 0, BIO_RESET_BYTES);
 	bio->bi_flags = flags;
 	atomic_set(&bio->__bi_remaining, 1);
+	bio_mark_owner(bio);
 }
 EXPORT_SYMBOL(bio_reset);
 

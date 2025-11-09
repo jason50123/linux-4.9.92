@@ -20,9 +20,12 @@
 #include <linux/cpu.h>
 #include <linux/cache.h>
 #include <linux/sched/sysctl.h>
+#include <linux/preempt.h>
 #include <linux/delay.h>
 #include <linux/crash_dump.h>
 #include <linux/prefetch.h>
+#include <linux/uidgid.h>
+#include <linux/user_namespace.h>
 
 #include <trace/events/block.h>
 
@@ -1143,6 +1146,7 @@ void blk_mq_flush_plug_list(struct blk_plug *plug, bool from_schedule)
 static void blk_mq_bio_to_request(struct request *rq, struct bio *bio)
 {
 	init_request_from_bio(rq, bio);
+	rq->rq_uid = bio->bi_uid;
 
 	blk_account_io_start(rq, 1);
 }
@@ -1182,7 +1186,23 @@ insert_rq:
 struct blk_map_ctx {
 	struct blk_mq_hw_ctx *hctx;
 	struct blk_mq_ctx *ctx;
+	bool preempt_disabled;
 };
+
+static void blk_mq_put_map_ctx(struct blk_map_ctx *data)
+{
+	if (!data->ctx)
+		return;
+
+	if (data->preempt_disabled) {
+		preempt_enable();
+		data->preempt_disabled = false;
+	} else {
+		blk_mq_put_ctx(data->ctx);
+	}
+
+	data->ctx = NULL;
+}
 
 static struct request *blk_mq_map_request(struct request_queue *q,
 					  struct bio *bio,
@@ -1196,8 +1216,34 @@ static struct request *blk_mq_map_request(struct request_queue *q,
 	struct blk_mq_alloc_data alloc_data;
 
 	blk_queue_enter_live(q);
-	ctx = blk_mq_get_ctx(q);
-	hctx = blk_mq_map_queue(q, ctx->cpu);
+
+	data->ctx = NULL;
+	data->hctx = NULL;
+	data->preempt_disabled = false;
+
+	ctx = NULL;
+	hctx = NULL;
+
+	if (q->mq_ops && q->nr_hw_queues > 1 && uid_valid(bio->bi_uid)) {
+		u32 uid32 = from_kuid(&init_user_ns, bio->bi_uid);
+		unsigned int hidx = uid32 % q->nr_hw_queues;
+		struct blk_mq_hw_ctx *candidate = q->queue_hw_ctx[hidx];
+
+		if (candidate && blk_mq_hw_queue_mapped(candidate) &&
+		    !cpumask_empty(candidate->cpumask)) {
+			unsigned int cpu = cpumask_first(candidate->cpumask);
+
+			preempt_disable();
+			ctx = __blk_mq_get_ctx(q, cpu);
+			hctx = candidate;
+			data->preempt_disabled = true;
+		}
+	}
+
+	if (!ctx) {
+		ctx = blk_mq_get_ctx(q);
+		hctx = blk_mq_map_queue(q, ctx->cpu);
+	}
 
 	if (rw_is_sync(bio_op(bio), bio->bi_opf))
 		op_flags |= REQ_SYNC;
@@ -1277,8 +1323,10 @@ static blk_qc_t blk_mq_make_request(struct request_queue *q, struct bio *bio)
 		return BLK_QC_T_NONE;
 
 	rq = blk_mq_map_request(q, bio, &data);
-	if (unlikely(!rq))
+	if (unlikely(!rq)) {
+		blk_mq_put_map_ctx(&data);
 		return BLK_QC_T_NONE;
+	}
 
 	cookie = blk_tag_to_qc_t(rq->tag, data.hctx->queue_num);
 
@@ -1318,7 +1366,7 @@ static blk_qc_t blk_mq_make_request(struct request_queue *q, struct bio *bio)
 			list_add_tail(&rq->queuelist, &plug->mq_list);
 		} else /* is_sync */
 			old_rq = rq;
-		blk_mq_put_ctx(data.ctx);
+		blk_mq_put_map_ctx(&data);
 		if (!old_rq)
 			goto done;
 		if (test_bit(BLK_MQ_S_STOPPED, &data.hctx->state) ||
@@ -1337,7 +1385,7 @@ static blk_qc_t blk_mq_make_request(struct request_queue *q, struct bio *bio)
 run_queue:
 		blk_mq_run_hw_queue(data.hctx, !is_sync || is_flush_fua);
 	}
-	blk_mq_put_ctx(data.ctx);
+	blk_mq_put_map_ctx(&data);
 done:
 	return cookie;
 }
@@ -1372,8 +1420,10 @@ static blk_qc_t blk_sq_make_request(struct request_queue *q, struct bio *bio)
 		request_count = blk_plug_queued_count(q);
 
 	rq = blk_mq_map_request(q, bio, &data);
-	if (unlikely(!rq))
+	if (unlikely(!rq)) {
+		blk_mq_put_map_ctx(&data);
 		return BLK_QC_T_NONE;
+	}
 
 	cookie = blk_tag_to_qc_t(rq->tag, data.hctx->queue_num);
 
@@ -1394,7 +1444,7 @@ static blk_qc_t blk_sq_make_request(struct request_queue *q, struct bio *bio)
 		if (!request_count)
 			trace_block_plug(q);
 
-		blk_mq_put_ctx(data.ctx);
+		blk_mq_put_map_ctx(&data);
 
 		if (request_count >= BLK_MAX_REQUEST_COUNT) {
 			blk_flush_plug_list(plug, false);
@@ -1416,7 +1466,7 @@ run_queue:
 		blk_mq_run_hw_queue(data.hctx, !is_sync || is_flush_fua);
 	}
 
-	blk_mq_put_ctx(data.ctx);
+	blk_mq_put_map_ctx(&data);
 	return cookie;
 }
 

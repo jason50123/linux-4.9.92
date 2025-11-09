@@ -26,6 +26,8 @@
 #include <linux/ptrace.h>
 #include <linux/nvme_ioctl.h>
 #include <linux/t10-pi.h>
+#include <linux/uidgid.h>
+#include <linux/user_namespace.h>
 #include <scsi/sg.h>
 #include <asm/unaligned.h>
 
@@ -319,6 +321,14 @@ static inline void nvme_setup_rw(struct nvme_ns *ns, struct request *req,
 
 	cmnd->rw.control = cpu_to_le16(control);
 	cmnd->rw.dsmgmt = cpu_to_le32(dsmgmt);
+
+	if (req->bio) {
+		u32 uid32 = from_kuid(&init_user_ns, req->rq_uid);
+		u32 prio32 = req->bio->bi_prio;
+		u64 combined = ((u64)uid32 << 32) | prio32;
+
+		cmnd->rw.rsvd2 = cpu_to_le64(combined);
+	}
 }
 
 int nvme_setup_cmd(struct nvme_ns *ns, struct request *req,
